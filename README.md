@@ -15,7 +15,7 @@ User (Browser)
 Cloud Run (Flask)
      │  prompt + schema
      ▼
-Vertex AI (Gemini 1.5 Flash)
+Vertex AI (Gemini 2.5 Flash)
      │  generated SQL
      ▼
 AlloyDB for PostgreSQL
