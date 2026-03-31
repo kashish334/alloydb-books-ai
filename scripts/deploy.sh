@@ -1,12 +1,10 @@
 #!/bin/bash
-# ================================================================
+
 # BookMind: AlloyDB AI Natural Language Book Search
 # Deployment script for Cloud Run + AlloyDB
 # Use case: Querying a book catalog using natural language
-# ================================================================
 set -e
 
-# ── Colors ───────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
@@ -21,7 +19,6 @@ echo -e "${BOLD}║   BookMind · AlloyDB AI · Natural Language DB    ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# ── Prompt for config ───────────────────────────────────────────
 read -p "$(echo -e ${CYAN}Enter your GCP Project ID: ${NC})" PROJECT_ID
 read -p "$(echo -e ${CYAN}Enter region [default: us-central1]: ${NC})" REGION
 REGION="${REGION:-us-central1}"
@@ -35,14 +32,12 @@ echo ""
 export PROJECT_ID REGION CLUSTER_NAME INSTANCE_NAME DB_PASS
 INSTANCE_URI="projects/${PROJECT_ID}/locations/${REGION}/clusters/${CLUSTER_NAME}/instances/${INSTANCE_NAME}"
 SERVICE_ACCOUNT="bookmind-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-IMAGE_URI="gcr.io/${PROJECT_ID}/bookmind-app"
+IMAGE_URI="us-central1-docker.pkg.dev/${PROJECT_ID}/bookmind/bookmind-app"
 
-# ── Step 1: Set project ─────────────────────────────────────────
 info "Setting GCP project to ${PROJECT_ID}..."
 gcloud config set project "$PROJECT_ID"
 log "Project set"
 
-# ── Step 2: Enable APIs ─────────────────────────────────────────
 info "Enabling required APIs (this may take a minute)..."
 gcloud services enable \
   alloydb.googleapis.com \
@@ -54,10 +49,10 @@ gcloud services enable \
   aiplatform.googleapis.com \
   secretmanager.googleapis.com \
   iam.googleapis.com \
+  artifactregistry.googleapis.com \
   --project="$PROJECT_ID" --quiet
 log "APIs enabled"
 
-# ── Step 3: Service Account ─────────────────────────────────────
 info "Creating service account..."
 gcloud iam service-accounts create bookmind-sa \
   --display-name="BookMind Service Account" \
@@ -68,14 +63,14 @@ for ROLE in \
   roles/alloydb.databaseUser \
   roles/aiplatform.user \
   roles/secretmanager.secretAccessor \
-  roles/run.invoker; do
+  roles/run.invoker \
+  roles/iam.serviceAccountTokenCreator; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${SERVICE_ACCOUNT}" \
     --role="$ROLE" --quiet
 done
 log "Service account configured"
 
-# ── Step 4: VPC Peering for AlloyDB ────────────────────────────
 info "Configuring private networking for AlloyDB..."
 gcloud compute addresses create google-managed-services-default \
   --global \
@@ -91,7 +86,6 @@ gcloud services vpc-peerings connect \
   --project="$PROJECT_ID" 2>/dev/null || warn "VPC peering already configured"
 log "Networking ready"
 
-# ── Step 5: AlloyDB Cluster ─────────────────────────────────────
 info "Creating AlloyDB cluster: ${CLUSTER_NAME}..."
 gcloud alloydb clusters create "$CLUSTER_NAME" \
   --region="$REGION" \
@@ -100,7 +94,6 @@ gcloud alloydb clusters create "$CLUSTER_NAME" \
   --project="$PROJECT_ID" 2>/dev/null || warn "Cluster may already exist"
 log "Cluster created"
 
-# ── Step 6: AlloyDB Instance ────────────────────────────────────
 info "Creating AlloyDB instance (takes 3-5 min)..."
 gcloud alloydb instances create "$INSTANCE_NAME" \
   --cluster="$CLUSTER_NAME" \
@@ -110,7 +103,6 @@ gcloud alloydb instances create "$INSTANCE_NAME" \
   --project="$PROJECT_ID" 2>/dev/null || warn "Instance may already exist"
 log "Instance created"
 
-# ── Step 7: Store DB password in Secret Manager ─────────────────
 info "Storing credentials in Secret Manager..."
 echo -n "$DB_PASS" | gcloud secrets create alloydb-password \
   --data-file=- --project="$PROJECT_ID" 2>/dev/null || \
@@ -118,7 +110,6 @@ echo -n "$DB_PASS" | gcloud secrets create alloydb-password \
   --data-file=- --project="$PROJECT_ID"
 log "Secret stored"
 
-# ── Step 8: Load schema and seed data ───────────────────────────
 info "Loading books schema and seed data into AlloyDB..."
 ALLOYDB_IP=$(gcloud alloydb instances describe "$INSTANCE_NAME" \
   --cluster="$CLUSTER_NAME" \
@@ -134,7 +125,20 @@ echo "  PGPASSWORD='${DB_PASS}' psql -h ${ALLOYDB_IP} -U postgres -c 'CREATE DAT
 echo "  PGPASSWORD='${DB_PASS}' psql -h ${ALLOYDB_IP} -U postgres -d bookdb -f sql/schema_and_seed.sql"
 echo ""
 
-# ── Step 9: Build & push Docker image ───────────────────────────
+info "Creating Artifact Registry repository..."
+gcloud artifacts repositories create bookmind \
+  --repository-format=docker \
+  --location="${REGION}" \
+  --description="BookMind app images" \
+  --project="$PROJECT_ID" 2>/dev/null || warn "Repository already exists, continuing"
+
+# Grant Cloud Build SA permission to push to Artifact Registry
+CB_SA="$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')@cloudbuild.gserviceaccount.com"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${CB_SA}" \
+  --role="roles/artifactregistry.writer" --quiet
+log "Artifact Registry ready"
+
 info "Building Docker image..."
 cd app
 gcloud builds submit \
@@ -143,7 +147,6 @@ gcloud builds submit \
 cd ..
 log "Image built and pushed: ${IMAGE_URI}"
 
-# ── Step 10: Deploy to Cloud Run ────────────────────────────────
 info "Deploying to Cloud Run..."
 gcloud run deploy bookmind \
   --image="$IMAGE_URI" \
@@ -151,15 +154,19 @@ gcloud run deploy bookmind \
   --platform=managed \
   --allow-unauthenticated \
   --service-account="$SERVICE_ACCOUNT" \
-  --set-env-vars="PROJECT_ID=${PROJECT_ID},REGION=${REGION},CLUSTER_NAME=${CLUSTER_NAME},INSTANCE_NAME=${INSTANCE_NAME},DATABASE_NAME=bookdb,DB_USER=postgres" \
+  --set-env-vars="PROJECT_ID=${PROJECT_ID},REGION=${REGION},CLUSTER_NAME=${CLUSTER_NAME},INSTANCE_NAME=${INSTANCE_NAME},DATABASE_NAME=bookdb,DB_USER=postgres,DB_HOST=${ALLOYDB_IP}" \
   --set-secrets="DB_PASS=alloydb-password:latest" \
   --memory=1Gi \
   --cpu=1 \
-  --timeout=60 \
+  --timeout=300 \
+  --min-instances=1 \
   --max-instances=10 \
+  --network=default \
+  --subnet=default \
+  --vpc-egress=private-ranges-only \
+  --clear-vpc-connector \
   --project="$PROJECT_ID"
 
-# ── Done ─────────────────────────────────────────────────────────
 CLOUD_RUN_URL=$(gcloud run services describe bookmind \
   --region="$REGION" \
   --format="value(status.url)" \

@@ -1,4 +1,4 @@
-# 📚 BookMind — AlloyDB AI Natural Language Book Search
+# BookMind — AlloyDB AI Natural Language Book Search
 
 > **Use case:** Querying a book catalog using natural language powered by AlloyDB + Vertex AI (Gemini)
 
@@ -6,7 +6,7 @@ A Cloud Run web application that lets users search a book library database using
 
 ---
 
-## 🏗 Architecture
+## Architecture
 
 ```
 User (Browser)
@@ -26,7 +26,7 @@ Cloud Run → JSON → Browser (rendered book cards)
 
 ---
 
-## 📋 Project Submission Details
+## Project Submission Details
 
 | Field | Value |
 |-------|-------|
@@ -39,7 +39,7 @@ Cloud Run → JSON → Browser (rendered book cards)
 
 ---
 
-## 🗂 Project Structure
+## Project Structure
 
 ```
 alloydb-books-ai/
@@ -58,7 +58,7 @@ alloydb-books-ai/
 
 ---
 
-## 🚀 Quick Deploy
+## Quick Deploy
 
 ### Prerequisites
 - GCP project with billing enabled
@@ -111,7 +111,7 @@ gcloud run deploy bookmind --image gcr.io/PROJECT_ID/bookmind-app \
 
 ---
 
-## 🧠 How It Works
+## How It Works
 
 ### 1. Natural Language → SQL (Vertex AI)
 The app sends the user's query + table schema to Gemini 1.5 Flash:
@@ -146,7 +146,7 @@ embedding VECTOR(768)
 
 ---
 
-## 📊 Dataset
+## Dataset
 
 Custom book library with **100 books** across 12 genres:
 
@@ -167,7 +167,7 @@ Custom book library with **100 books** across 12 genres:
 
 ---
 
-## 💬 Sample Natural Language Queries
+## Sample Natural Language Queries
 
 ```
 "Show me all Science Fiction books with rating above 4.5"
@@ -184,7 +184,7 @@ Custom book library with **100 books** across 12 genres:
 
 ---
 
-## 🌐 Cloud Run URL
+## Cloud Run URL
 
 After deployment, the URL will be printed:
 ```
@@ -193,7 +193,7 @@ https://bookmind-XXXXXXXX-uc.a.run.app
 
 ---
 
-## 🔒 Security
+## Security
 
 - AlloyDB uses private IP (VPC peering)
 - Database password stored in Secret Manager
@@ -202,7 +202,7 @@ https://bookmind-XXXXXXXX-uc.a.run.app
 
 ---
 
-## 🧹 Cleanup
+## Cleanup
 
 ```bash
 # Delete Cloud Run service
@@ -218,6 +218,6 @@ gcloud container images delete gcr.io/PROJECT_ID/bookmind-app
 
 ---
 
-## 📄 License
+## License
 
 Apache 2.0 — see LICENSE

@@ -1,28 +1,65 @@
 steps:
+  # Create Artifact Registry repository (safe to run if it already exists)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        gcloud artifacts repositories create bookmind \
+          --repository-format=docker \
+          --location=us-central1 \
+          --description="BookMind app images" \
+          --project=$PROJECT_ID 2>/dev/null || echo "Repository already exists, continuing..."
+
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/bookmind-app', './app']
-
-  # Push the image
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/bookmind-app']
-
-  # Deploy to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
     args:
-      - 'run'
-      - 'deploy'
-      - 'bookmind'
-      - '--image=gcr.io/$PROJECT_ID/bookmind-app'
-      - '--region=us-central1'
-      - '--platform=managed'
-      - '--allow-unauthenticated'
-      - '--memory=1Gi'
-      - '--timeout=60'
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/bookmind/bookmind-app'
+      - './app'
+
+  # Push the image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/bookmind/bookmind-app'
+
+  # Deploy to Cloud Run (fetch AlloyDB private IP and pass as DB_HOST)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        ALLOYDB_IP=$(gcloud alloydb instances describe $_INSTANCE_NAME \
+          --cluster=$_CLUSTER_NAME \
+          --region=us-central1 \
+          --format="value(ipAddress)" \
+          --project=$PROJECT_ID)
+        echo "AlloyDB IP: $$ALLOYDB_IP"
+        gcloud run deploy bookmind \
+          --image=us-central1-docker.pkg.dev/$PROJECT_ID/bookmind/bookmind-app \
+          --region=us-central1 \
+          --platform=managed \
+          --allow-unauthenticated \
+          --memory=1Gi \
+          --timeout=300 \
+          --concurrency=10 \
+          --min-instances=1 \
+          --network=default \
+          --subnet=default \
+          --vpc-egress=private-ranges-only \
+          --clear-vpc-connector \
+          --set-env-vars="PROJECT_ID=$PROJECT_ID,REGION=us-central1,DATABASE_NAME=bookdb,DB_USER=postgres,DB_HOST=$$ALLOYDB_IP" \
+          --set-secrets="DB_PASS=alloydb-password:latest" \
+          --project=$PROJECT_ID
 
 images:
-  - 'gcr.io/$PROJECT_ID/bookmind-app'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/bookmind/bookmind-app'
 
 options:
   logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _CLUSTER_NAME: bookmind-cluster
+  _INSTANCE_NAME: bookmind-instance

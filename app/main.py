@@ -4,13 +4,10 @@ Use case: Querying a book catalog using natural language powered by AlloyDB + Ve
 """
 
 import os
-import json
 import logging
-import pg8000
 import sqlalchemy
 from sqlalchemy import text
 from flask import Flask, render_template, request, jsonify
-from google.cloud.alloydb.connector import Connector
 import vertexai
 from vertexai.generative_models import GenerativeModel
 
@@ -19,96 +16,96 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ── Config ──────────────────────────────────────────────────────────────────
-PROJECT_ID      = os.environ.get("PROJECT_ID", "")
-REGION          = os.environ.get("REGION", "us-central1")
-CLUSTER_NAME    = os.environ.get("CLUSTER_NAME", "alloydb-books-cluster")
-INSTANCE_NAME   = os.environ.get("INSTANCE_NAME", "alloydb-books-instance")
-DATABASE_NAME   = os.environ.get("DATABASE_NAME", "bookdb")
-DB_USER         = os.environ.get("DB_USER", "postgres")
-DB_PASS         = os.environ.get("DB_PASS", "")
+PROJECT_ID    = os.environ.get("PROJECT_ID", "")
+REGION        = os.environ.get("REGION", "us-central1")
+CLUSTER_NAME  = os.environ.get("CLUSTER_NAME", "alloydb-books-cluster")
+INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "alloydb-books-instance")
+DATABASE_NAME = os.environ.get("DATABASE_NAME", "bookdb")
+DB_USER       = os.environ.get("DB_USER", "postgres")
+DB_PASS       = os.environ.get("DB_PASS", "")
+DB_HOST       = os.environ.get("DB_HOST", "")
 
-ALLOYDB_INSTANCE_URI = (
-    f"projects/{PROJECT_ID}/locations/{REGION}"
-    f"/clusters/{CLUSTER_NAME}/instances/{INSTANCE_NAME}"
-)
+vertexai.init(project=PROJECT_ID, location=REGION)
+model = GenerativeModel("gemini-2.5-flash")
+logger.info("Vertex AI initialized")
 
-# ── DB Connection ────────────────────────────────────────────────────────────
-connector = None
 engine = None
 
 def get_engine():
-    global connector, engine
+    global engine
     if engine:
         return engine
-    connector = Connector()
-
-    def getconn():
-        conn = connector.connect(
-            ALLOYDB_INSTANCE_URI,
-            "pg8000",
-            user=DB_USER,
-            password=DB_PASS,
-            db=DATABASE_NAME,
+    if not DB_HOST:
+        raise RuntimeError(
+            "DB_HOST env var is not set. "
+            "Set it to the private IP of your AlloyDB instance."
         )
-        return conn
+    try:
+        url = sqlalchemy.engine.URL.create(
+            drivername="postgresql+pg8000",
+            username=DB_USER,
+            password=DB_PASS,
+            host=DB_HOST,
+            port=5432,
+            database=DATABASE_NAME,
+        )
+        engine = sqlalchemy.create_engine(
+            url,
+            pool_size=5,
+            max_overflow=2,
+            pool_timeout=30,
+            pool_pre_ping=True,
+        )
+        # Verify connection immediately so we fail fast on startup
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        logger.info(f"AlloyDB connected via direct IP: {DB_HOST}")
+        return engine
+    except Exception as e:
+        engine = None
+        logger.error(f"DB connection failed: {e}")
+        raise RuntimeError(f"Database connection failed: {e}") from e
 
-    engine = sqlalchemy.create_engine(
-        "postgresql+pg8000://",
-        creator=getconn,
-        pool_size=5,
-        max_overflow=2,
-    )
-    return engine
 
-
-# ── Vertex AI NL → SQL ───────────────────────────────────────────────────────
-def nl_to_sql(natural_language_query: str) -> str:
-    """Convert natural language to SQL using Vertex AI Gemini."""
-    vertexai.init(project=PROJECT_ID, location=REGION)
-    model = GenerativeModel("gemini-1.5-flash")
-
-    schema_description = """
+SCHEMA_DESCRIPTION = """
 Table: books
 Columns:
   - id: INTEGER (primary key)
-  - title: VARCHAR(500) — book title
-  - author: VARCHAR(300) — author name
-  - genre: VARCHAR(100) — genre (e.g., Fiction, Science Fiction, Mystery, Romance, Biography, History, Self-Help, Fantasy, Thriller, Horror)
-  - publication_year: INTEGER — year published (1900-2024)
-  - pages: INTEGER — number of pages
-  - rating: NUMERIC(3,2) — average rating (1.00 to 5.00)
-  - language: VARCHAR(50) — language (e.g., English, Spanish, French)
-  - description: TEXT — short book description
-  - is_bestseller: BOOLEAN — whether it was a bestseller
-  - price_usd: NUMERIC(6,2) — price in USD
+  - title: VARCHAR(500)
+  - author: VARCHAR(300)
+  - genre: VARCHAR(100) — e.g. Fiction, Science Fiction, Mystery, Romance, Biography, History, Self-Help, Fantasy, Thriller, Horror
+  - publication_year: INTEGER (1900–2024)
+  - pages: INTEGER
+  - rating: NUMERIC(3,2) — 1.00 to 5.00
+  - language: VARCHAR(50) — e.g. English, Spanish, French
+  - description: TEXT
+  - is_bestseller: BOOLEAN
+  - price_usd: NUMERIC(6,2)
 """
 
-    prompt = f"""You are a PostgreSQL expert. Convert the user's natural language query to a valid SQL SELECT statement.
+def nl_to_sql(natural_language_query: str) -> str:
+    prompt = f"""You are a PostgreSQL expert. Convert the user query to a valid SQL SELECT statement.
 
-Database Schema:
-{schema_description}
-
+Schema:{SCHEMA_DESCRIPTION}
 Rules:
-- Return ONLY the SQL query, no explanation, no markdown, no backticks
-- Always use lowercase column names
-- Use ILIKE for text searches (case-insensitive)
-- Limit results to 20 rows unless user specifies otherwise
-- Use ORDER BY rating DESC as default sort unless user specifies
-- For genre searches use ILIKE '%genre%'
+- Return ONLY the SQL query — no explanation, no markdown, no backticks
+- Use lowercase column names
+- Use ILIKE for text searches
+- Default LIMIT 20 unless user specifies
+- Default ORDER BY rating DESC
 
 User query: {natural_language_query}
 
 SQL:"""
-
-    response = model.generate_content(prompt)
-    sql = response.text.strip()
-    # Clean up any accidental markdown
-    sql = sql.replace("```sql", "").replace("```", "").strip()
+    response = model.generate_content(
+        prompt,
+        generation_config={"max_output_tokens": 256},
+    )
+    sql = response.text.strip().replace("```sql", "").replace("```", "").strip()
     return sql
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+#Routes 
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -118,16 +115,14 @@ def index():
 def query():
     data = request.get_json()
     nl_query = data.get("query", "").strip()
-
     if not nl_query:
         return jsonify({"error": "Query cannot be empty"}), 400
 
+    sql_query = ""
     try:
-        # Step 1: NL → SQL
         sql_query = nl_to_sql(nl_query)
         logger.info(f"Generated SQL: {sql_query}")
 
-        # Step 2: Execute against AlloyDB
         db_engine = get_engine()
         with db_engine.connect() as conn:
             result = conn.execute(text(sql_query))
@@ -142,10 +137,9 @@ def query():
             "rows": rows,
             "count": len(rows),
         })
-
     except Exception as e:
         logger.error(f"Query error: {e}")
-        return jsonify({"error": str(e), "generated_sql": sql_query if 'sql_query' in locals() else ""}), 500
+        return jsonify({"error": str(e), "generated_sql": sql_query}), 500
 
 
 @app.route("/health")
@@ -153,9 +147,18 @@ def health():
     return jsonify({"status": "ok", "service": "alloydb-books-ai"})
 
 
+@app.route("/warmup")
+def warmup():
+    try:
+        get_engine()
+        return jsonify({"status": "warm", "db": "connected"})
+    except Exception as e:
+        return jsonify({"status": "warm", "db": str(e)}), 200
+
+
 @app.route("/sample-queries")
 def sample_queries():
-    samples = [
+    return jsonify({"samples": [
         "Show me all Science Fiction books with rating above 4.5",
         "Find mystery books published after 2010 that are bestsellers",
         "What are the top 5 highest rated books under 300 pages?",
@@ -164,8 +167,7 @@ def sample_queries():
         "Find all English biographies published between 2000 and 2020",
         "What are the cheapest self-help books with rating above 4?",
         "Show me horror books that are not bestsellers but have high ratings",
-    ]
-    return jsonify({"samples": samples})
+    ]})
 
 
 if __name__ == "__main__":
